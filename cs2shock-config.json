@@ -1,0 +1,22 @@
+{
+  "shock_mode": "LastHitPercentage",
+  "min_duration": 0.3,
+  "max_duration": 1.0,
+  "min_intensity": 1,
+  "max_intensity": 15,
+  "beep_on_match_start": true,
+  "beep_on_round_start": false,
+  "warning_beep_before_shock": true,
+  "warning_beep_duration": 2,
+  "shock_chance": 50,
+  "shock_timing_mode": "EndOfRoundIfTeamLoses",
+  "prevent_shock_if_round_kills_reached": true,
+  "round_kills_to_prevent_shock": 1,
+  "username": "yourusername",
+  "selected_client_id": 123456,
+  "selected_shocker_id": 234567,
+  "selected_device_name": "yourdevicename",
+  "selected_shocker_name": "yourshockername",
+  "apikey": "yourapikey",
+  "setup_dismissed": false
+}

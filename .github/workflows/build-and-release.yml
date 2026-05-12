@@ -1,0 +1,89 @@
+name: Build And Release
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  BIN_NAME: cs2shock.exe
+  BIN_PATH: target/release/cs2shock.exe
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    if: github.event_name != 'release'
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 "${{ env.BIN_PATH }}").Hash.ToLower()
+          "{0} *{1}" -f $hash, "${{ env.BIN_NAME }}" | Out-File -FilePath SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cs2shock-windows
+          path: |
+            ${{ env.BIN_PATH }}
+            SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  release-windows:
+    if: github.event_name == 'release'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Generate SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 "${{ env.BIN_PATH }}").Hash.ToLower()
+          "{0} *{1}" -f $hash, "${{ env.BIN_NAME }}" | Out-File -FilePath SHA256SUMS.txt -Encoding ascii
+
+      - name: Generate build provenance attestation
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ env.BIN_PATH }}
+
+      - name: Attach assets to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.BIN_PATH }}
+            SHA256SUMS.txt
+          fail_on_unmatched_files: true
