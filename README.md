@@ -49,8 +49,8 @@ CS2 Love is designed to coexist with [CS2Shock](https://github.com/OstlerDev/cs2
 
 **Why isn't my toy buzzing?**
 - Make sure Intiface Central is running and **Start Server** has been pressed.
-- Confirm your toy is connected and visible in Intiface Central's **Devices** tab.
-- In CS2 Love, press **Scan for toys** and check that the toy is listed and ticked.
+- In Intiface Central, press **Start Scanning** and confirm your toy appears in the **Devices** tab. CS2 Love mirrors whatever Intiface is connected to, so a toy that is live in Intiface should show up in CS2 Love's toy list automatically.
+- Tick the toy in CS2 Love's toy list so vibration rewards target it.
 - Use **Test vibrate** to send a 1-second 50% buzz directly to your selected toys - if that fails, the issue is between CS2 Love and Intiface, not with CS2.
 - Check the logs for the app to see what might have happened.
 

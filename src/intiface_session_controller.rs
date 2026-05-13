@@ -1,4 +1,4 @@
-use std::{sync::mpsc::Sender, time::Duration};
+use std::sync::mpsc::Sender;
 
 use log::warn;
 
@@ -7,31 +7,21 @@ use crate::{
     intiface::{self, DiscoveredToy},
 };
 
-const SCAN_DURATION: Duration = Duration::from_secs(5);
-
 #[derive(Debug)]
 pub enum SessionAsyncResult {
     Connect {
         request_id: u64,
         result: Result<(), String>,
     },
-    Discovery {
-        request_id: u64,
-        result: Result<Vec<DiscoveredToy>, String>,
-    },
 }
 
 #[derive(Debug, Default)]
 pub struct IntifaceSessionController {
-    discovered_toys: Vec<DiscoveredToy>,
     committed_url: Option<String>,
     next_async_request_id: u64,
     latest_connect_request_id: Option<u64>,
-    latest_discovery_request_id: Option<u64>,
     connect_in_progress: bool,
-    discovery_in_progress: bool,
     connect_status_error: Option<String>,
-    toy_status: Option<String>,
 }
 
 impl IntifaceSessionController {
@@ -61,8 +51,6 @@ impl IntifaceSessionController {
         }
 
         self.committed_url = Some(current_url);
-        self.discovered_toys.clear();
-        self.toy_status = None;
         self.connect_status_error = None;
 
         if !is_valid_url(&config.intiface_websocket_url) {
@@ -75,19 +63,6 @@ impl IntifaceSessionController {
         }
 
         self.start_connect(sender, config);
-    }
-
-    pub fn refresh_manually(&mut self, sender: &Sender<SessionAsyncResult>, config: &Config) {
-        if !is_valid_url(&config.intiface_websocket_url) {
-            self.connect_status_error =
-                Some("Enter a valid ws:// or wss:// URL before scanning".into());
-            return;
-        }
-
-        self.start_discovery(sender);
-        if !self.is_connected_optimistically() {
-            self.start_connect(sender, config);
-        }
     }
 
     pub fn handle_async_result(&mut self, result: SessionAsyncResult, _config: &mut Config) {
@@ -106,43 +81,11 @@ impl IntifaceSessionController {
                     }
                 }
             }
-            SessionAsyncResult::Discovery { request_id, result } => {
-                if self.latest_discovery_request_id != Some(request_id) {
-                    return;
-                }
-                self.discovery_in_progress = false;
-                match result {
-                    Ok(toys) => {
-                        self.toy_status = Some(if toys.is_empty() {
-                            "No toys were discovered. Make sure your toy is on and in range.".into()
-                        } else {
-                            format!("Discovered {} toy(s).", toys.len())
-                        });
-                        self.discovered_toys = toys;
-                    }
-                    Err(error) => {
-                        self.toy_status = Some(error);
-                        self.discovered_toys.clear();
-                    }
-                }
-            }
         }
     }
 
-    pub fn discovered_toys(&self) -> &[DiscoveredToy] {
-        &self.discovered_toys
-    }
-
-    pub fn discovery_in_progress(&self) -> bool {
-        self.discovery_in_progress
-    }
-
-    pub fn connect_in_progress(&self) -> bool {
-        self.connect_in_progress
-    }
-
-    pub fn toy_status(&self) -> Option<&str> {
-        self.toy_status.as_deref()
+    pub fn available_toys(&self) -> Vec<DiscoveredToy> {
+        intiface::list_devices()
     }
 
     pub fn connection_status_label(&self) -> String {
@@ -171,11 +114,6 @@ impl IntifaceSessionController {
         self.next_async_request_id
     }
 
-    fn is_connected_optimistically(&self) -> bool {
-        self.connect_in_progress
-            || (self.latest_connect_request_id.is_some() && self.connect_status_error.is_none())
-    }
-
     fn start_connect(&mut self, sender: &Sender<SessionAsyncResult>, config: &Config) {
         let request_id = self.next_request_id();
         self.latest_connect_request_id = Some(request_id);
@@ -190,31 +128,6 @@ impl IntifaceSessionController {
             }
         });
     }
-
-    fn start_discovery(&mut self, sender: &Sender<SessionAsyncResult>) {
-        let request_id = self.next_request_id();
-        self.latest_discovery_request_id = Some(request_id);
-        self.discovery_in_progress = true;
-        self.toy_status = Some("Scanning for toys...".into());
-        let tx = sender.clone();
-        tokio::spawn(async move {
-            let result = run_discovery().await;
-            if let Err(err) = tx.send(SessionAsyncResult::Discovery { request_id, result }) {
-                warn!(target: "Intiface", "Could not deliver discovery result: {err}");
-            }
-        });
-    }
-}
-
-async fn run_discovery() -> Result<Vec<DiscoveredToy>, String> {
-    if !intiface::is_connected() {
-        return Err("Connect to Intiface before scanning".into());
-    }
-
-    intiface::start_scanning().await?;
-    tokio::time::sleep(SCAN_DURATION).await;
-    let _ = intiface::stop_scanning().await;
-    Ok(intiface::list_devices())
 }
 
 fn normalize_url_field(config: &mut Config) {
@@ -238,7 +151,10 @@ pub fn is_valid_url(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_url, normalize_url_field, normalized_url};
+    use super::{
+        is_valid_url, normalize_url_field, normalized_url, IntifaceSessionController,
+        SessionAsyncResult,
+    };
     use crate::config::Config;
 
     #[test]
@@ -271,5 +187,64 @@ mod tests {
         config.intiface_websocket_url = "  ws://example/  ".into();
 
         assert_eq!(normalized_url(&config), "ws://example/");
+    }
+
+    #[test]
+    fn connection_status_label_reports_default_state() {
+        let controller = IntifaceSessionController::default();
+        assert_eq!(controller.connection_status_label(), "Intiface: not connected.");
+    }
+
+    #[test]
+    fn connection_status_label_reports_in_flight_connect() {
+        let mut controller = IntifaceSessionController::default();
+        controller.connect_in_progress = true;
+        assert_eq!(controller.connection_status_label(), "Intiface: connecting...");
+    }
+
+    #[test]
+    fn connection_status_label_surfaces_connect_error() {
+        let mut controller = IntifaceSessionController::default();
+        controller.connect_status_error = Some("boom".into());
+        assert_eq!(controller.connection_status_label(), "Intiface: boom");
+    }
+
+    #[test]
+    fn handle_async_result_ignores_stale_connect_response() {
+        let mut controller = IntifaceSessionController::default();
+        controller.latest_connect_request_id = Some(7);
+        controller.connect_in_progress = true;
+
+        let mut config = Config::default();
+        controller.handle_async_result(
+            SessionAsyncResult::Connect {
+                request_id: 3,
+                result: Ok(()),
+            },
+            &mut config,
+        );
+
+        assert!(controller.connect_in_progress);
+        assert!(controller.connect_status_error.is_none());
+    }
+
+    #[test]
+    fn handle_async_result_records_latest_connect_outcome() {
+        let mut controller = IntifaceSessionController::default();
+        controller.latest_connect_request_id = Some(2);
+        controller.connect_in_progress = true;
+        controller.connect_status_error = Some("stale".into());
+
+        let mut config = Config::default();
+        controller.handle_async_result(
+            SessionAsyncResult::Connect {
+                request_id: 2,
+                result: Ok(()),
+            },
+            &mut config,
+        );
+
+        assert!(!controller.connect_in_progress);
+        assert!(controller.connect_status_error.is_none());
     }
 }

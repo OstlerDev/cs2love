@@ -285,12 +285,6 @@ impl MyApp {
         }
     }
 
-    fn rescan_toys(&mut self) {
-        info!(target: "GUI", "Scanning for toys");
-        self.session_controller
-            .refresh_manually(&self.async_result_tx, &self.changes);
-    }
-
     fn send_test_vibration(&self) {
         info!(target: "GUI", "Sending test vibration");
         let toys = self.changes.selected_toy_identifiers.clone();
@@ -314,22 +308,7 @@ impl MyApp {
         });
     }
 
-    fn render_scan_and_test_buttons(&mut self, ui: &mut egui::Ui) {
-        let scan_button = if self.session_controller.discovery_in_progress() {
-            Button::new("Scanning...")
-        } else if self.session_controller.connect_in_progress() {
-            Button::new("Connecting...")
-        } else {
-            Button::new("Scan for toys")
-        };
-
-        let scan_enabled = !self.session_controller.discovery_in_progress()
-            && !self.session_controller.connect_in_progress();
-
-        if ui.add_enabled(scan_enabled, scan_button).clicked() {
-            self.rescan_toys();
-        }
-
+    fn render_test_vibration_button(&mut self, ui: &mut egui::Ui) {
         if ui
             .add_enabled(
                 !self.changes.selected_toy_identifiers.is_empty(),
@@ -342,8 +321,8 @@ impl MyApp {
     }
 
     fn render_toy_checklist(&mut self, ui: &mut egui::Ui) {
-        let discovered = self.session_controller.discovered_toys();
-        let mut all_names: Vec<String> = discovered.iter().map(|t| t.name.clone()).collect();
+        let available = self.session_controller.available_toys();
+        let mut all_names: Vec<String> = available.iter().map(|t| t.name.clone()).collect();
         for selected in &self.changes.selected_toy_identifiers {
             if !all_names.iter().any(|name| name == selected) {
                 all_names.push(selected.clone());
@@ -351,14 +330,14 @@ impl MyApp {
         }
 
         if all_names.is_empty() {
-            ui.label("No toys discovered yet. Press Scan for toys.");
+            ui.label("No toys connected. Pair a toy in Intiface Central.");
             return;
         }
 
         let mut changed = false;
         for name in all_names {
             let mut selected = self.changes.selected_toy_identifiers.contains(&name);
-            let label = if discovered.iter().any(|t| t.name == name) {
+            let label = if available.iter().any(|t| t.name == name) {
                 name.clone()
             } else {
                 format!("{name} (offline)")
@@ -383,16 +362,13 @@ impl MyApp {
     }
 
     fn render_intiface_status(&self, ui: &mut egui::Ui) {
-        if let Some(status) = self.session_controller.toy_status() {
-            ui.label(status);
-        }
         ui.label(self.session_controller.connection_status_label());
     }
 
     fn render_intiface_section(&mut self, ui: &mut egui::Ui) {
         ui.label("Intiface Central");
         self.render_intiface_url_field(ui, "intiface_url_field");
-        ui.horizontal(|ui| self.render_scan_and_test_buttons(ui));
+        ui.horizontal(|ui| self.render_test_vibration_button(ui));
         self.render_toy_checklist(ui);
         self.render_intiface_status(ui);
     }
@@ -806,7 +782,7 @@ impl MyApp {
 
             self.render_intiface_status(ui);
             self.render_toy_checklist(ui);
-            ui.horizontal(|ui| self.render_scan_and_test_buttons(ui));
+            ui.horizontal(|ui| self.render_test_vibration_button(ui));
 
             let can_finish = self.setup_summary().is_complete();
             if can_finish {

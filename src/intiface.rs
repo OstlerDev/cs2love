@@ -115,6 +115,8 @@ pub async fn connect(url: &str) -> Result<(), String> {
                 }
                 ButtplugClientEvent::ServerDisconnect => {
                     warn!(target: "Intiface", "Intiface server disconnected");
+                    store_client(None);
+                    clear_last_event();
                 }
                 ButtplugClientEvent::Error(err) => {
                     error!(target: "Intiface", "Server error: {err}");
@@ -138,26 +140,6 @@ pub async fn disconnect() {
         warn!(target: "Intiface", "Disconnect returned an error: {err}");
     }
     info!(target: "Intiface", "Disconnected from Intiface server");
-}
-
-pub async fn start_scanning() -> Result<(), String> {
-    let Some(client) = current_client() else {
-        return Err("Not connected to Intiface server".into());
-    };
-    client
-        .start_scanning()
-        .await
-        .map_err(|e| format!("Failed to start scanning: {e}"))
-}
-
-pub async fn stop_scanning() -> Result<(), String> {
-    let Some(client) = current_client() else {
-        return Err("Not connected to Intiface server".into());
-    };
-    client
-        .stop_scanning()
-        .await
-        .map_err(|e| format!("Failed to stop scanning: {e}"))
 }
 
 pub fn list_devices() -> Vec<DiscoveredToy> {
@@ -217,12 +199,40 @@ pub async fn vibrate_for(toy_names: Vec<String>, strength_percent: u32, duration
                 error!(target: "Intiface", "Failed to vibrate `{device_name}`: {err}");
                 return;
             }
+            touch_last_event();
 
             tokio::time::sleep(duration).await;
 
             if let Err(err) = device.stop().await {
                 error!(target: "Intiface", "Failed to stop `{device_name}`: {err}");
+                return;
             }
+            touch_last_event();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_last_event, last_event_elapsed, touch_last_event};
+    use std::sync::Mutex;
+
+    // The LAST_EVENT_AT helpers all read/write a single process-global OnceLock,
+    // so tests that touch it must run sequentially to stay deterministic.
+    static SERIALIZE: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn last_event_helpers_round_trip_through_global_state() {
+        let _guard = SERIALIZE.lock().unwrap_or_else(|p| p.into_inner());
+
+        clear_last_event();
+        assert!(last_event_elapsed().is_none());
+
+        touch_last_event();
+        let elapsed = last_event_elapsed().expect("touch should populate last event");
+        assert!(elapsed.as_secs() < 5);
+
+        clear_last_event();
+        assert!(last_event_elapsed().is_none());
     }
 }

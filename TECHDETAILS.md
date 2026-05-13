@@ -9,8 +9,10 @@ CS2 Love uses the [Buttplug v10 protocol](https://buttplug.io/) via the official
 - **Server URL** (default): `ws://127.0.0.1:12345`
 - The app keeps one long-running `ButtplugClient` alive and reuses it across all vibration commands.
 - Vibration is sent as a [`ClientDeviceOutputCommand::Vibrate(ClientDeviceCommandValue::Percent(0.0..=1.0))`](https://docs.rs/buttplug/latest/buttplug/device/enum.ClientDeviceOutputCommand.html), followed by a configurable sleep, then a `device.stop()`.
-- Selected toys are persisted by the human-readable name reported by Intiface (`device.name()`) so re-scans and reconnects don't invalidate the selection.
+- Selected toys are persisted by the human-readable name reported by Intiface (`device.name()`) so reconnects don't invalidate the selection.
 - Per-toy commands are serialized behind a Tokio `Mutex` so back-to-back kills queue up cleanly instead of cancelling each other mid-vibration.
+- CS2 Love is a passive observer of Intiface's device state - it never issues `StartScanning` or `StopScanning` itself. The toy list shown in the UI is driven entirely by Intiface's `DeviceList` (sent on connect) and subsequent `DeviceAdded` / `DeviceRemoved` notifications, so toys appear and disappear in CS2 Love within ~100 ms of being paired or unpaired in Intiface Central. Use Intiface Central's own **Start Scanning** button to bring new hardware online.
+- The "Intiface: connected, last event Ns ago" status reflects the most recent successful round-trip with Intiface in either direction - either an inbound event (DeviceAdded/Removed/etc.) or an outbound vibration command that Intiface acknowledged. A climbing counter that never resets means CS2 Love hasn't heard anything from Intiface lately; on a `ServerDisconnect` event the counter is cleared and the connection status flips to "not connected".
 
 ## Game State Integration (GSI)
 
