@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 env:
-  BIN_NAME: cs2shock.exe
-  BIN_PATH: target/release/cs2shock.exe
+  BIN_NAME: cs2love.exe
+  BIN_PATH: target/release/cs2love.exe
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -41,7 +41,7 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: cs2shock-windows
+          name: cs2love-windows
           path: |
             ${{ env.BIN_PATH }}
             SHA256SUMS.txt

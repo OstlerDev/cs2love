@@ -11,22 +11,24 @@ use tokio::sync::RwLock;
 
 use crate::{
     config::{
-        Config, RoundEndRewardGating, ShockMode, ShockTimingMode, CONFIG_FILE_PATH,
-        MAX_REWARD_KILL_THRESHOLD, MAX_SHOCK_DURATION, MIN_REWARD_KILL_THRESHOLD,
-        MIN_SHOCK_DURATION,
+        Config, RoundEndRewardGating, CONFIG_FILE_PATH, MAX_REWARD_KILL_THRESHOLD,
+        MAX_VIBRATION_DURATION_MS, MAX_VIBRATION_STRENGTH_PERCENT, MIN_REWARD_KILL_THRESHOLD,
+        MIN_VIBRATION_DURATION_MS,
     },
-    pishock,
-    pishock_session_controller::{PishockSessionController, SessionAsyncResult},
+    intiface,
+    intiface_session_controller::{IntifaceSessionController, SessionAsyncResult},
     setup::{self, Cs2IntegrationStatus, SetupStep, SetupSummary},
     sounds::{self, SoundChoice, VOLUME_PERCENT_MAX},
 };
 
 const AUTO_SAVE_DEBOUNCE: Duration = Duration::from_millis(400);
+const TEST_VIBRATION_STRENGTH_PERCENT: u32 = 50;
+const TEST_VIBRATION_DURATION_MS: u64 = 1000;
 
 pub async fn run(config: Arc<RwLock<Config>>) {
     let png_bytes = include_bytes!("../assets/icon.png");
     let viewport = ViewportBuilder::default()
-        .with_inner_size([360.0, 670.0])
+        .with_inner_size([360.0, 720.0])
         .with_resizable(false)
         .with_icon(Arc::new(
             from_png_bytes(png_bytes).expect("Failed to load icon"),
@@ -40,7 +42,7 @@ pub async fn run(config: Arc<RwLock<Config>>) {
     let changes = config.read().await.clone();
     let (async_result_tx, async_result_rx) = mpsc::channel();
     let _ = eframe::run_native(
-        "CS2 Shock",
+        "CS2 Love",
         options,
         Box::new(move |_cc| {
             Box::new(MyApp::new(
@@ -61,16 +63,10 @@ struct MyApp {
     setup_install_action_status: Option<String>,
     setup_section_revision: u64,
     last_setup_step: SetupStep,
-    revealed_auth_field: Option<AuthField>,
     async_result_tx: mpsc::Sender<SessionAsyncResult>,
     async_result_rx: mpsc::Receiver<SessionAsyncResult>,
-    session_controller: PishockSessionController,
+    session_controller: IntifaceSessionController,
     auto_save: AutoSaveState,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AuthField {
-    ApiKey,
 }
 
 #[derive(Debug, Default)]
@@ -130,84 +126,6 @@ fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, edit_id: Id) -> 
             .labelled_by(label_id)
     })
     .inner
-}
-
-fn secret_text_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: &mut String,
-    edit_id: Id,
-    auth_field: AuthField,
-    revealed_auth_field: &mut Option<AuthField>,
-) -> egui::Response {
-    ui.horizontal(|ui| {
-        let mut label_id = Id::NULL;
-        ui.horizontal(|ui| {
-            ui.set_width(85.0);
-            label_id = ui.label(label).id;
-        });
-
-        let is_revealed = *revealed_auth_field == Some(auth_field);
-        let response = ui
-            .add(
-                TextEdit::singleline(value)
-                    .id_source(edit_id)
-                    .password(!is_revealed),
-            )
-            .labelled_by(label_id);
-
-        if response.has_focus() && *revealed_auth_field != Some(auth_field) {
-            *revealed_auth_field = Some(auth_field);
-            ui.ctx().request_repaint();
-        } else if response.lost_focus() && *revealed_auth_field == Some(auth_field) {
-            *revealed_auth_field = None;
-            ui.ctx().request_repaint();
-        }
-        response
-    })
-    .inner
-}
-
-fn has_selected_target(config: &Config) -> bool {
-    config.selected_client_id.is_some() && config.selected_shocker_id.is_some()
-}
-
-fn should_require_selected_target(config: &Config) -> bool {
-    !config.username.trim().is_empty() || !config.apikey.trim().is_empty()
-}
-
-fn apply_selected_target(config: &mut Config, target: &pishock::DiscoveredTarget) {
-    config.selected_client_id = Some(target.client_id);
-    config.selected_shocker_id = Some(target.shocker_id);
-    config.selected_device_name = target.device_name.clone();
-    config.selected_shocker_name = target.shocker_name.clone();
-}
-
-fn discovered_target_label(target: &pishock::DiscoveredTarget) -> String {
-    let paused_suffix = if target.is_paused { " (paused)" } else { "" };
-    format!(
-        "{} / {}{}",
-        target.device_name, target.shocker_name, paused_suffix
-    )
-}
-
-fn selected_target_label(config: &Config) -> String {
-    match (
-        config.selected_device_name.trim(),
-        config.selected_shocker_name.trim(),
-        config.selected_client_id,
-        config.selected_shocker_id,
-    ) {
-        (device_name, shocker_name, Some(_), Some(_))
-            if !device_name.is_empty() && !shocker_name.is_empty() =>
-        {
-            format!("{device_name} / {shocker_name}")
-        }
-        (_, _, Some(client_id), Some(shocker_id)) => {
-            format!("Device {client_id} / Shocker {shocker_id}")
-        }
-        _ => "Choose a PiShock shocker".into(),
-    }
 }
 
 fn setup_section_title(label: &str, is_complete: bool) -> String {
@@ -270,7 +188,7 @@ impl MyApp {
         let cs2_integration_status = setup::detect_cs2_integration();
         let initial_setup_step =
             SetupSummary::from_config(&changes, cs2_integration_status.clone()).current_step();
-        let mut session_controller = PishockSessionController::new(&changes);
+        let mut session_controller = IntifaceSessionController::new(&changes);
         session_controller.sync_startup(&async_result_tx, &changes);
 
         Self {
@@ -281,7 +199,6 @@ impl MyApp {
             setup_install_action_status: None,
             setup_section_revision: 0,
             last_setup_step: initial_setup_step,
-            revealed_auth_field: None,
             async_result_tx,
             async_result_rx,
             session_controller,
@@ -353,45 +270,33 @@ impl MyApp {
         }
     }
 
-    fn render_auth_fields(
-        &mut self,
-        ui: &mut egui::Ui,
-        username_id_source: &'static str,
-        api_key_id_source: &'static str,
-    ) {
-        let username_response = text_row(
+    fn render_intiface_url_field(&mut self, ui: &mut egui::Ui, edit_id_source: &'static str) {
+        let response = text_row(
             ui,
-            "Username: ",
-            &mut self.changes.username,
-            ui.make_persistent_id(username_id_source),
-        );
-        let api_key_response = secret_text_row(
-            ui,
-            "API key: ",
-            &mut self.changes.apikey,
-            ui.make_persistent_id(api_key_id_source),
-            AuthField::ApiKey,
-            &mut self.revealed_auth_field,
+            "Intiface URL: ",
+            &mut self.changes.intiface_websocket_url,
+            ui.make_persistent_id(edit_id_source),
         );
 
-        if username_response.lost_focus() || api_key_response.lost_focus() {
+        if response.lost_focus() {
             self.session_controller
-                .refresh_after_auth_commit(&self.async_result_tx, &mut self.changes);
+                .refresh_after_url_commit(&self.async_result_tx, &mut self.changes);
             self.auto_save.request_immediate_save();
         }
     }
 
-    fn refresh_shockers(&mut self) {
-        info!(target: "GUI", "Loading PiShock shockers");
+    fn rescan_toys(&mut self) {
+        info!(target: "GUI", "Scanning for toys");
         self.session_controller
             .refresh_manually(&self.async_result_tx, &self.changes);
     }
 
-    fn send_test_beep(&self) {
-        info!(target: "GUI", "Sending test beep");
-        let config = Arc::new(RwLock::new(self.changes.clone()));
+    fn send_test_vibration(&self) {
+        info!(target: "GUI", "Sending test vibration");
+        let toys = self.changes.selected_toy_identifiers.clone();
         tokio::spawn(async move {
-            pishock::beep(config, 1).await;
+            intiface::vibrate_for(toys, TEST_VIBRATION_STRENGTH_PERCENT, TEST_VIBRATION_DURATION_MS)
+                .await;
         });
     }
 
@@ -409,93 +314,106 @@ impl MyApp {
         });
     }
 
-    fn render_refresh_and_test_buttons(&mut self, ui: &mut egui::Ui, refresh_label: &str) {
-        let discovery_button = if self.session_controller.discovery_in_progress() {
-            Button::new("Loading shockers...")
+    fn render_scan_and_test_buttons(&mut self, ui: &mut egui::Ui) {
+        let scan_button = if self.session_controller.discovery_in_progress() {
+            Button::new("Scanning...")
+        } else if self.session_controller.connect_in_progress() {
+            Button::new("Connecting...")
         } else {
-            Button::new(refresh_label)
+            Button::new("Scan for toys")
         };
+
+        let scan_enabled = !self.session_controller.discovery_in_progress()
+            && !self.session_controller.connect_in_progress();
+
+        if ui.add_enabled(scan_enabled, scan_button).clicked() {
+            self.rescan_toys();
+        }
 
         if ui
             .add_enabled(
-                !self.session_controller.discovery_in_progress(),
-                discovery_button,
+                !self.changes.selected_toy_identifiers.is_empty(),
+                Button::new("Test vibrate"),
             )
             .clicked()
         {
-            self.refresh_shockers();
-        }
-
-        if ui
-            .add_enabled(has_selected_target(&self.changes), Button::new("Test beep"))
-            .clicked()
-        {
-            self.send_test_beep();
+            self.send_test_vibration();
         }
     }
 
-    fn render_shocker_picker(&mut self, ui: &mut egui::Ui, combo_id_source: &'static str) {
-        if !self.session_controller.discovered_targets().is_empty() {
-            let mut chosen_target = None;
-
-            ui.horizontal(|ui| {
-                ui.horizontal(|ui| {
-                    ui.set_width(85.0);
-                    ui.label("Shocker: ");
-                });
-
-                ComboBox::from_id_source(combo_id_source)
-                    .selected_text(selected_target_label(&self.changes))
-                    .show_ui(ui, |ui| {
-                        for target in self.session_controller.discovered_targets() {
-                            let is_selected = Some(target.client_id)
-                                == self.changes.selected_client_id
-                                && Some(target.shocker_id) == self.changes.selected_shocker_id;
-
-                            if ui
-                                .selectable_label(is_selected, discovered_target_label(target))
-                                .clicked()
-                            {
-                                chosen_target = Some(target.clone());
-                            }
-                        }
-                    });
-            });
-
-            if let Some(target) = chosen_target {
-                apply_selected_target(&mut self.changes, &target);
-                self.session_controller
-                    .set_target_status(format!("Selected {}.", discovered_target_label(&target)));
-                self.auto_save.request_immediate_save();
+    fn render_toy_checklist(&mut self, ui: &mut egui::Ui) {
+        let discovered = self.session_controller.discovered_toys();
+        let mut all_names: Vec<String> = discovered.iter().map(|t| t.name.clone()).collect();
+        for selected in &self.changes.selected_toy_identifiers {
+            if !all_names.iter().any(|name| name == selected) {
+                all_names.push(selected.clone());
             }
-        } else if has_selected_target(&self.changes) {
-            ui.label(format!(
-                "Saved shocker: {}",
-                selected_target_label(&self.changes)
-            ));
+        }
+
+        if all_names.is_empty() {
+            ui.label("No toys discovered yet. Press Scan for toys.");
+            return;
+        }
+
+        let mut changed = false;
+        for name in all_names {
+            let mut selected = self.changes.selected_toy_identifiers.contains(&name);
+            let label = if discovered.iter().any(|t| t.name == name) {
+                name.clone()
+            } else {
+                format!("{name} (offline)")
+            };
+            if ui.checkbox(&mut selected, label).changed() {
+                if selected {
+                    if !self.changes.selected_toy_identifiers.contains(&name) {
+                        self.changes.selected_toy_identifiers.push(name.clone());
+                    }
+                } else {
+                    self.changes
+                        .selected_toy_identifiers
+                        .retain(|n| n != &name);
+                }
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.auto_save.request_immediate_save();
         }
     }
 
-    fn render_status_labels(&self, ui: &mut egui::Ui) {
-        if should_require_selected_target(&self.changes) && !has_selected_target(&self.changes) {
-            ui.label("Select the shocker you want to use.");
-        }
-
-        if let Some(status) = self.session_controller.target_status() {
+    fn render_intiface_status(&self, ui: &mut egui::Ui) {
+        if let Some(status) = self.session_controller.toy_status() {
             ui.label(status);
         }
+        ui.label(self.session_controller.connection_status_label());
+    }
 
-        ui.label(self.session_controller.broker_status_label());
+    fn render_intiface_section(&mut self, ui: &mut egui::Ui) {
+        ui.label("Intiface Central");
+        self.render_intiface_url_field(ui, "intiface_url_field");
+        ui.horizontal(|ui| self.render_scan_and_test_buttons(ui));
+        self.render_toy_checklist(ui);
+        self.render_intiface_status(ui);
     }
 
     fn render_rewards_section(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Rewards")
-            .id_source("rewards_section")
+        egui::CollapsingHeader::new("Sound Rewards")
+            .id_source("sound_rewards_section")
             .default_open(false)
             .show(ui, |ui| {
                 self.render_kill_reward_block(ui);
                 ui.separator();
                 self.render_round_end_reward_block(ui);
+            });
+
+        egui::CollapsingHeader::new("Vibration Rewards")
+            .id_source("vibration_rewards_section")
+            .default_open(true)
+            .show(ui, |ui| {
+                self.render_kill_vibration_block(ui);
+                ui.separator();
+                self.render_round_end_vibration_block(ui);
             });
     }
 
@@ -635,15 +553,109 @@ impl MyApp {
         });
     }
 
+    fn render_kill_vibration_block(&mut self, ui: &mut egui::Ui) {
+        ui.label("Instant vibration on every kill");
+
+        let enabled_changed = ui
+            .add(egui::Checkbox::new(
+                &mut self.changes.vibrations.kill_vibration_enabled,
+                "Vibrate on each kill",
+            ))
+            .changed();
+        if enabled_changed {
+            self.auto_save.request_immediate_save();
+        }
+
+        let enabled = self.changes.vibrations.kill_vibration_enabled;
+        render_vibration_strength_row(
+            ui,
+            enabled,
+            "kill_vibration_strength",
+            &mut self.changes.vibrations.kill_vibration_strength_percent,
+            &mut self.auto_save,
+        );
+        render_vibration_duration_row(
+            ui,
+            enabled,
+            "kill_vibration_duration",
+            &mut self.changes.vibrations.kill_vibration_duration_ms,
+            &mut self.auto_save,
+        );
+    }
+
+    fn render_round_end_vibration_block(&mut self, ui: &mut egui::Ui) {
+        ui.label("End-of-round vibration when kill threshold is met");
+
+        let enabled_changed = ui
+            .add(egui::Checkbox::new(
+                &mut self.changes.vibrations.round_end_vibration_enabled,
+                "Vibrate at round end if threshold is met",
+            ))
+            .changed();
+        if enabled_changed {
+            self.auto_save.request_immediate_save();
+        }
+
+        let enabled = self.changes.vibrations.round_end_vibration_enabled;
+
+        ui.horizontal(|ui| {
+            let label = ui.label("Kill threshold: ");
+            let response = ui.add_enabled(
+                enabled,
+                DragValue::new(&mut self.changes.vibrations.round_end_vibration_kill_threshold)
+                    .speed(1)
+                    .clamp_range(MIN_REWARD_KILL_THRESHOLD..=MAX_REWARD_KILL_THRESHOLD)
+                    .suffix(" kills"),
+            );
+            let changed = response.changed();
+            response.labelled_by(label.id);
+            if changed {
+                self.auto_save.request_debounced_save();
+            }
+        });
+
+        ui.label("Trigger:");
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.vertical_centered_justified(|ui| {
+                let always = ui.selectable_value(
+                    &mut self.changes.vibrations.round_end_vibration_gating,
+                    RoundEndRewardGating::Always,
+                    "Always when threshold met",
+                );
+                let win_only = ui.selectable_value(
+                    &mut self.changes.vibrations.round_end_vibration_gating,
+                    RoundEndRewardGating::OnlyIfTeamWins,
+                    "Only if team wins",
+                );
+                if always.changed() || win_only.changed() {
+                    self.auto_save.request_immediate_save();
+                }
+            });
+        });
+
+        render_vibration_strength_row(
+            ui,
+            enabled,
+            "round_end_vibration_strength",
+            &mut self.changes.vibrations.round_end_vibration_strength_percent,
+            &mut self.auto_save,
+        );
+        render_vibration_duration_row(
+            ui,
+            enabled,
+            "round_end_vibration_duration",
+            &mut self.changes.vibrations.round_end_vibration_duration_ms,
+            &mut self.auto_save,
+        );
+    }
+
     fn render_setup_banner(&mut self, ui: &mut egui::Ui, summary: &SetupSummary) {
         ui.group(|ui| {
-            ui.label(
-                "Finish setup to install the CS2 integration and connect your PiShock shocker.",
-            );
+            ui.label("Finish setup to install the CS2 integration and connect Intiface.");
             ui.label(match summary.current_step() {
                 SetupStep::InstallCs2Integration => "Next step: install the CS2 integration file.",
-                SetupStep::ConnectPishock => "Next step: enter your PiShock username and API key.",
-                SetupStep::ChooseShocker => "Next step: pick which PiShock shocker to use.",
+                SetupStep::ConnectIntiface => "Next step: enter the Intiface Central URL.",
+                SetupStep::ChooseToy => "Next step: choose at least one toy to use.",
                 SetupStep::Complete => "Setup is complete.",
             });
             if ui.button("Finish setup").clicked() {
@@ -660,7 +672,7 @@ impl MyApp {
         .id_source(("setup_install_section", self.setup_section_revision))
         .default_open(summary.current_step() == SetupStep::InstallCs2Integration)
         .show(ui, |ui| {
-            ui.label("CS2 needs one small file so the game can send live events to CS2Shock.");
+            ui.label("CS2 needs one small file so the game can send live events to CS2 Love.");
 
             match &summary.cs2_integration {
                 Cs2IntegrationStatus::Installed { .. } => {
@@ -732,7 +744,7 @@ impl MyApp {
                     "1. In your Steam Library, select Counter-Strike 2, click on the Settings button and choose 'Properties', then click Installed Files > Browse.",
                 );
                 ui.label("2. Open the `game/csgo/cfg` folder.");
-                ui.label("3. Copy `gamestate_integration_cs2shock.cfg` into that folder.");
+                ui.label("3. Copy `gamestate_integration_cs2love.cfg` into that folder.");
                 ui.label("4. If you want a manual copy, save the file to Downloads and drag it into the cfg folder.");
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -763,42 +775,38 @@ impl MyApp {
         });
     }
 
-    fn render_setup_connect_section(&mut self, ui: &mut egui::Ui, summary: &SetupSummary) {
+    fn render_setup_intiface_section(&mut self, ui: &mut egui::Ui, summary: &SetupSummary) {
         egui::CollapsingHeader::new(setup_section_title(
-            "2. Connect PiShock",
-            summary.has_auth_credentials,
+            "2. Connect Intiface",
+            summary.has_intiface_url,
         ))
-        .id_source(("setup_connect_section", self.setup_section_revision))
-        .default_open(summary.current_step() == SetupStep::ConnectPishock)
+        .id_source(("setup_intiface_section", self.setup_section_revision))
+        .default_open(summary.current_step() == SetupStep::ConnectIntiface)
         .show(ui, |ui| {
-            ui.label("Enter your PiShock username and API key.");
-            self.render_auth_fields(ui, "setup_username_field", "setup_api_key_field");
+            ui.label("Install Intiface Central, press 'Start Server', then enter its WebSocket URL below.");
+            self.render_intiface_url_field(ui, "setup_intiface_url_field");
             ui.horizontal_wrapped(|ui| {
-                ui.hyperlink_to(
-                    "Create PiShock API Key",
-                    "https://login.pishock.com/account",
-                );
+                ui.hyperlink_to("Download Intiface Central", "https://intiface.com/central");
             });
         });
     }
 
-    fn render_setup_shocker_section(&mut self, ui: &mut egui::Ui, summary: &SetupSummary) {
+    fn render_setup_toy_section(&mut self, ui: &mut egui::Ui, summary: &SetupSummary) {
         egui::CollapsingHeader::new(setup_section_title(
-            "3. Choose a shocker",
-            summary.has_selected_target,
+            "3. Choose toys",
+            summary.has_selected_toys,
         ))
-        .id_source(("setup_shocker_section", self.setup_section_revision))
-        .default_open(summary.current_step() == SetupStep::ChooseShocker)
+        .id_source(("setup_toy_section", self.setup_section_revision))
+        .default_open(summary.current_step() == SetupStep::ChooseToy)
         .show(ui, |ui| {
-            if !summary.has_auth_credentials {
-                ui.label("Finish the PiShock login step first, then load your shockers.");
+            if !summary.has_intiface_url {
+                ui.label("Enter the Intiface Central URL above before scanning.");
                 return;
             }
 
-            self.render_status_labels(ui);
-
-            self.render_shocker_picker(ui, "setup_shocker_picker");
-            ui.horizontal(|ui| self.render_refresh_and_test_buttons(ui, "Refresh shockers"));
+            self.render_intiface_status(ui);
+            self.render_toy_checklist(ui);
+            ui.horizontal(|ui| self.render_scan_and_test_buttons(ui));
 
             let can_finish = self.setup_summary().is_complete();
             if can_finish {
@@ -829,16 +837,16 @@ impl MyApp {
             .default_width(340.0)
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("CS2Shock needs a couple of quick setup steps before it will work.");
+                ui.label("CS2 Love needs a couple of quick setup steps before it will work.");
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(430.0)
                     .show(ui, |ui| {
                         self.render_setup_install_section(ui, &summary);
                         ui.separator();
-                        self.render_setup_connect_section(ui, &summary);
+                        self.render_setup_intiface_section(ui, &summary);
                         ui.separator();
-                        self.render_setup_shocker_section(ui, &summary);
+                        self.render_setup_toy_section(ui, &summary);
                     });
             });
 
@@ -846,6 +854,59 @@ impl MyApp {
             self.dismiss_setup();
         }
     }
+}
+
+fn render_vibration_strength_row(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    id_source: &'static str,
+    value: &mut u32,
+    auto_save: &mut AutoSaveState,
+) {
+    ui.horizontal(|ui| {
+        let label = ui.label("Strength: ");
+        let response = ui.add_enabled(
+            enabled,
+            DragValue::new(value)
+                .speed(1)
+                .clamp_range(0..=MAX_VIBRATION_STRENGTH_PERCENT)
+                .suffix("%"),
+        );
+        let changed = response.changed();
+        response.labelled_by(label.id).on_hover_text(format!(
+            "0-{} percent of maximum vibrator output",
+            MAX_VIBRATION_STRENGTH_PERCENT
+        ));
+        if changed {
+            auto_save.request_debounced_save();
+        }
+        let _ = id_source;
+    });
+}
+
+fn render_vibration_duration_row(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    id_source: &'static str,
+    value: &mut u32,
+    auto_save: &mut AutoSaveState,
+) {
+    ui.horizontal(|ui| {
+        let label = ui.label("Duration: ");
+        let response = ui.add_enabled(
+            enabled,
+            DragValue::new(value)
+                .speed(50)
+                .clamp_range(MIN_VIBRATION_DURATION_MS..=MAX_VIBRATION_DURATION_MS)
+                .suffix(" ms"),
+        );
+        let changed = response.changed();
+        response.labelled_by(label.id);
+        if changed {
+            auto_save.request_debounced_save();
+        }
+        let _ = id_source;
+    });
 }
 
 impl eframe::App for MyApp {
@@ -865,229 +926,19 @@ impl eframe::App for MyApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             let setup_summary = self.setup_summary();
-            ui.heading("CS2 Shock");
+            ui.heading("CS2 Love");
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false; 2])
                 .show(ui, |ui| {
-            if setup_summary.needs_setup() && self.changes.setup_dismissed {
-                self.render_setup_banner(ui, &setup_summary);
-                ui.separator();
-            }
+                    if setup_summary.needs_setup() && self.changes.setup_dismissed {
+                        self.render_setup_banner(ui, &setup_summary);
+                        ui.separator();
+                    }
 
-            self.render_auth_fields(ui, "username_field", "api_key_field");
-
-            ui.vertical_centered_justified(|ui| {
-                ui.separator();
-                ui.horizontal(|ui| self.render_refresh_and_test_buttons(ui, "Refresh shockers"));
-            });
-
-            self.render_shocker_picker(ui, "pishock_target_picker");
-            self.render_status_labels(ui);
-
-            ui.vertical_centered(|ui| {
-                ui.separator();
-                ui.label("Shock Mode: ");
-            });
-            ui.vertical_centered_justified(|ui| {
-                let random = ui.selectable_value(
-                    &mut self.changes.shock_mode,
-                    ShockMode::Random,
-                    "Random Intensity",
-                );
-                let last_hit = ui.selectable_value(
-                    &mut self.changes.shock_mode,
-                    ShockMode::LastHitPercentage,
-                    "Last Hit Percentage",
-                );
-                if random.changed() || last_hit.changed() {
-                    self.auto_save.request_immediate_save();
-                }
-            });
-            ui.vertical_centered(|ui| ui.separator());
-
-            ui.vertical_centered(|ui| {
-                ui.label("Shock Timing: ");
-            });
-            ui.vertical_centered_justified(|ui| {
-                let immediate = ui.selectable_value(
-                    &mut self.changes.shock_timing_mode,
-                    ShockTimingMode::Immediate,
-                    "Shock immediately on death",
-                );
-                let round_end = ui.selectable_value(
-                    &mut self.changes.shock_timing_mode,
-                    ShockTimingMode::EndOfRound,
-                    "Shock at round end",
-                );
-                let round_loss_only = ui.selectable_value(
-                    &mut self.changes.shock_timing_mode,
-                    ShockTimingMode::EndOfRoundIfTeamLoses,
-                    "Shock at round end only if team loses",
-                );
-                if immediate.changed() || round_end.changed() || round_loss_only.changed() {
-                    self.auto_save.request_immediate_save();
-                }
-            });
-            ui.vertical_centered(|ui| {
-                ui.separator();
-            });
-
-            let beep_on_match_start = ui.add(egui::Checkbox::new(
-                &mut self.changes.beep_on_match_start,
-                "Beep on match start",
-            ));
-            if beep_on_match_start.changed() {
-                self.auto_save.request_immediate_save();
-            }
-
-            let beep_on_round_start = ui.add(egui::Checkbox::new(
-                &mut self.changes.beep_on_round_start,
-                "Beep on round start",
-            ));
-            if beep_on_round_start.changed() {
-                self.auto_save.request_immediate_save();
-            }
-            ui.vertical_centered(|ui| {
-                ui.separator();
-            });
-
-            let prevent_shock_if_round_kills_reached = ui.add(egui::Checkbox::new(
-                &mut self.changes.prevent_shock_if_round_kills_reached,
-                "Prevent shock if round kills reached",
-            ));
-            if prevent_shock_if_round_kills_reached.changed() {
-                self.auto_save.request_immediate_save();
-            }
-
-            ui.horizontal(|ui| {
-                let round_kill_label = ui.label("Kill threshold: ");
-                let round_kills = ui.add_enabled(
-                    self.changes.prevent_shock_if_round_kills_reached,
-                    DragValue::new(&mut self.changes.round_kills_to_prevent_shock)
-                        .speed(1)
-                        .clamp_range(1..=5)
-                        .suffix(" kills"),
-                );
-                let round_kills_changed = round_kills.changed();
-                round_kills.labelled_by(round_kill_label.id);
-                if round_kills_changed {
-                    self.auto_save.request_debounced_save();
-                }
-            });
-            ui.vertical_centered(|ui| {
-                ui.separator();
-            });
-
-            self.render_rewards_section(ui);
-
-            ui.vertical_centered(|ui| {
-                ui.separator();
-            });
-
-            let warning_beep_before_shock = ui.add(egui::Checkbox::new(
-                &mut self.changes.warning_beep_before_shock,
-                "Play warning beep before shock",
-            ));
-            if warning_beep_before_shock.changed() {
-                self.auto_save.request_immediate_save();
-            }
-            ui.horizontal(|ui| {
-                let warning_beep_label = ui.label("Warning duration: ");
-                let warning_duration = ui.add_enabled(
-                    self.changes.warning_beep_before_shock,
-                    DragValue::new(&mut self.changes.warning_beep_duration)
-                        .speed(1)
-                        .clamp_range(1..=15)
-                        .suffix(" sec"),
-                );
-                let warning_duration_changed = warning_duration.changed();
-                warning_duration.labelled_by(warning_beep_label.id);
-                if warning_duration_changed {
-                    self.auto_save.request_debounced_save();
-                }
-            });
-
-            ui.horizontal(|ui| {
-                let shock_chance_label = ui.label("Chance to shock: ");
-                let shock_chance = ui.add(
-                    DragValue::new(&mut self.changes.shock_chance)
-                        .speed(1)
-                        .clamp_range(0..=100)
-                        .suffix("%"),
-                );
-                let shock_chance_changed = shock_chance.changed();
-                shock_chance.labelled_by(shock_chance_label.id);
-                if shock_chance_changed {
-                    self.auto_save.request_debounced_save();
-                }
-            });
-
-            ui.horizontal(|ui| {
-                let indensity_label = ui.label("Shock intensity: ");
-
-                let min_intensity = ui.add(
-                    DragValue::new(&mut self.changes.min_intensity)
-                        .speed(1)
-                        .clamp_range(1..=self.changes.max_intensity)
-                        .prefix("Min "),
-                );
-                let min_intensity_changed = min_intensity.changed();
-                min_intensity.labelled_by(indensity_label.id);
-                if min_intensity_changed {
-                    self.auto_save.request_debounced_save();
-                }
-
-                let max_intensity = ui.add(
-                    DragValue::new(&mut self.changes.max_intensity)
-                        .speed(1)
-                        .clamp_range(self.changes.min_intensity.max(1)..=100)
-                        .prefix("Max "),
-                );
-                let max_intensity_changed = max_intensity.changed();
-                max_intensity.labelled_by(indensity_label.id);
-                if max_intensity_changed {
-                    self.auto_save.request_debounced_save();
-                }
-            });
-            ui.horizontal(|ui| {
-                let duration_label = ui.label("Shock duration: ");
-                let min_duration = ui.add(
-                    DragValue::new(&mut self.changes.min_duration)
-                        .speed(0.1)
-                        .clamp_range(MIN_SHOCK_DURATION..=self.changes.max_duration)
-                        .min_decimals(1)
-                        .max_decimals(1)
-                        .prefix("Min ")
-                        .suffix(" sec"),
-                );
-                let min_duration_changed = min_duration.changed();
-                min_duration.labelled_by(duration_label.id);
-                if min_duration_changed {
-                    self.auto_save.request_debounced_save();
-                }
-
-                let max_duration = ui.add(
-                    DragValue::new(&mut self.changes.max_duration)
-                        .speed(0.1)
-                        .clamp_range(
-                            self.changes.min_duration.max(MIN_SHOCK_DURATION)..=MAX_SHOCK_DURATION,
-                        )
-                        .min_decimals(1)
-                        .max_decimals(1)
-                        .prefix("Max ")
-                        .suffix(" sec"),
-                );
-                let max_duration_changed = max_duration.changed();
-                max_duration.labelled_by(duration_label.id);
-                if max_duration_changed {
-                    self.auto_save.request_debounced_save();
-                }
-            });
-
-            ui.vertical_centered(|ui| {
-                ui.separator();
-            });
+                    self.render_intiface_section(ui);
+                    ui.separator();
+                    self.render_rewards_section(ui);
                 });
 
             if self.auto_save.take_save_due() {
@@ -1108,7 +959,7 @@ impl eframe::App for MyApp {
             self.render_setup_modal(ctx);
         }
 
-        // Keep periodic UI ticks for heartbeat freshness and debounce checks.
+        // Keep periodic UI ticks for connection-status freshness and debounce checks.
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }

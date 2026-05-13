@@ -6,12 +6,10 @@ use std::{
     process::Command,
 };
 
-use reqwest::Url;
+use crate::{config::Config, intiface_session_controller::is_valid_url};
 
-use crate::config::Config;
-
-pub const GSI_CFG_FILE_NAME: &str = "gamestate_integration_cs2shock.cfg";
-pub const EXPECTED_GSI_URI: &str = "http://127.0.0.1:3000/data";
+pub const GSI_CFG_FILE_NAME: &str = "gamestate_integration_cs2love.cfg";
+pub const EXPECTED_GSI_URI: &str = "http://127.0.0.1:3001/data";
 
 const CS2_CFG_RELATIVE_PATH: &str =
     "steamapps\\common\\Counter-Strike Global Offensive\\game\\csgo\\cfg";
@@ -80,24 +78,24 @@ impl Cs2IntegrationStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SetupStep {
     InstallCs2Integration,
-    ConnectPishock,
-    ChooseShocker,
+    ConnectIntiface,
+    ChooseToy,
     Complete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupSummary {
     pub cs2_integration: Cs2IntegrationStatus,
-    pub has_auth_credentials: bool,
-    pub has_selected_target: bool,
+    pub has_intiface_url: bool,
+    pub has_selected_toys: bool,
 }
 
 impl SetupSummary {
     pub fn from_config(config: &Config, cs2_integration: Cs2IntegrationStatus) -> Self {
         Self {
             cs2_integration,
-            has_auth_credentials: has_auth_credentials(config),
-            has_selected_target: has_selected_target(config),
+            has_intiface_url: has_intiface_url(config),
+            has_selected_toys: has_selected_toys(config),
         }
     }
 
@@ -106,12 +104,12 @@ impl SetupSummary {
             return SetupStep::InstallCs2Integration;
         }
 
-        if !self.has_auth_credentials {
-            return SetupStep::ConnectPishock;
+        if !self.has_intiface_url {
+            return SetupStep::ConnectIntiface;
         }
 
-        if !self.has_selected_target {
-            return SetupStep::ChooseShocker;
+        if !self.has_selected_toys {
+            return SetupStep::ChooseToy;
         }
 
         SetupStep::Complete
@@ -126,12 +124,12 @@ impl SetupSummary {
     }
 }
 
-pub fn has_auth_credentials(config: &Config) -> bool {
-    !config.username.trim().is_empty() && !config.apikey.trim().is_empty()
+pub fn has_intiface_url(config: &Config) -> bool {
+    is_valid_url(&config.intiface_websocket_url)
 }
 
-pub fn has_selected_target(config: &Config) -> bool {
-    config.selected_client_id.is_some() && config.selected_shocker_id.is_some()
+pub fn has_selected_toys(config: &Config) -> bool {
+    !config.selected_toy_identifiers.is_empty()
 }
 
 pub fn detect_cs2_integration() -> Cs2IntegrationStatus {
@@ -179,7 +177,7 @@ pub fn open_cs2_cfg_folder(target_path: &Path) -> Result<(), String> {
 }
 
 pub fn expected_gsi_cfg_contents() -> &'static str {
-    include_str!("../gamestate_integration_cs2shock.cfg")
+    include_str!("../gamestate_integration_cs2love.cfg")
 }
 
 fn inspect_cs2_integration_at(target_path: &Path) -> Cs2IntegrationStatus {
@@ -223,13 +221,13 @@ fn validate_installed_gsi_cfg(contents: &str) -> Result<(), String> {
 }
 
 fn is_expected_gsi_uri(uri: &str) -> bool {
-    let Ok(parsed) = Url::parse(uri.trim()) else {
+    let Ok(parsed) = url::Url::parse(uri.trim()) else {
         return false;
     };
 
     matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
         && parsed.scheme() == "http"
-        && parsed.port_or_known_default() == Some(3000)
+        && parsed.port_or_known_default() == Some(3001)
         && parsed.path() == "/data"
 }
 
@@ -409,7 +407,7 @@ fn steam_install_root_from_registry() -> Option<PathBuf> {
 mod tests {
     use super::{
         detect_cs2_cfg_target_path_from_roots, downloads_dir_from_home, expected_gsi_cfg_contents,
-        has_auth_credentials, inspect_cs2_integration_at, install_cs2_integration,
+        has_intiface_url, has_selected_toys, inspect_cs2_integration_at, install_cs2_integration,
         is_expected_gsi_uri, parse_steam_library_paths, Cs2IntegrationStatus, SetupStep,
         SetupSummary, EXPECTED_GSI_URI, GSI_CFG_FILE_NAME,
     };
@@ -465,8 +463,9 @@ mod tests {
 
     #[test]
     fn localhost_uri_is_treated_as_equivalent() {
-        assert!(is_expected_gsi_uri("http://localhost:3000/data"));
+        assert!(is_expected_gsi_uri("http://localhost:3001/data"));
         assert!(is_expected_gsi_uri(EXPECTED_GSI_URI));
+        assert!(!is_expected_gsi_uri("http://localhost:3000/data"));
     }
 
     #[test]
@@ -544,22 +543,9 @@ mod tests {
     }
 
     #[test]
-    fn setup_summary_requires_auth_after_cs2_is_installed() {
-        let summary = SetupSummary::from_config(
-            &Config::default(),
-            Cs2IntegrationStatus::Installed {
-                target_path: PathBuf::from("cfg").join(GSI_CFG_FILE_NAME),
-            },
-        );
-
-        assert_eq!(summary.current_step(), SetupStep::ConnectPishock);
-    }
-
-    #[test]
-    fn setup_summary_requires_shocker_after_auth() {
+    fn setup_summary_requires_intiface_after_cs2_is_installed() {
         let mut config = Config::default();
-        config.username = "player".into();
-        config.apikey = "key".into();
+        config.intiface_websocket_url = String::new();
 
         let summary = SetupSummary::from_config(
             &config,
@@ -568,8 +554,23 @@ mod tests {
             },
         );
 
-        assert!(has_auth_credentials(&config));
-        assert_eq!(summary.current_step(), SetupStep::ChooseShocker);
+        assert_eq!(summary.current_step(), SetupStep::ConnectIntiface);
+    }
+
+    #[test]
+    fn setup_summary_requires_toy_after_intiface_url() {
+        let config = Config::default();
+
+        let summary = SetupSummary::from_config(
+            &config,
+            Cs2IntegrationStatus::Installed {
+                target_path: PathBuf::from("cfg").join(GSI_CFG_FILE_NAME),
+            },
+        );
+
+        assert!(has_intiface_url(&config));
+        assert!(!has_selected_toys(&config));
+        assert_eq!(summary.current_step(), SetupStep::ChooseToy);
     }
 
     #[test]
@@ -585,12 +586,17 @@ mod tests {
         assert_eq!(summary.current_step(), SetupStep::Complete);
     }
 
+    #[test]
+    fn has_intiface_url_rejects_invalid_schemes() {
+        let mut config = Config::default();
+        config.intiface_websocket_url = "http://127.0.0.1:12345".into();
+
+        assert!(!has_intiface_url(&config));
+    }
+
     fn configured_setup() -> Config {
         let mut config = Config::default();
-        config.username = "player".into();
-        config.apikey = "key".into();
-        config.selected_client_id = Some(1);
-        config.selected_shocker_id = Some(2);
+        config.selected_toy_identifiers = vec!["Lovense Lush".into()];
         config
     }
 
@@ -604,7 +610,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!("cs2shock-{label}-{unique}"));
+            let path = std::env::temp_dir().join(format!("cs2love-{label}-{unique}"));
             fs::create_dir_all(&path).unwrap();
             Self { path }
         }
