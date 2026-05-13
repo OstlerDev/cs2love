@@ -897,6 +897,9 @@ impl eframe::App for MyApp {
             ctx.request_repaint();
         }
 
+        self.session_controller
+            .pump(&self.async_result_tx, &self.changes);
+
         self.reset_setup_dismissal_if_complete();
         self.sync_setup_section_revision();
 

@@ -1,4 +1,7 @@
-use std::sync::mpsc::Sender;
+use std::{
+    sync::mpsc::Sender,
+    time::{Duration, Instant},
+};
 
 use log::warn;
 
@@ -6,6 +9,8 @@ use crate::{
     config::Config,
     intiface::{self, DiscoveredToy},
 };
+
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum SessionAsyncResult {
@@ -15,6 +20,13 @@ pub enum SessionAsyncResult {
     },
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ReconnectAction {
+    Idle,
+    Schedule(Instant),
+    Fire,
+}
+
 #[derive(Debug, Default)]
 pub struct IntifaceSessionController {
     committed_url: Option<String>,
@@ -22,6 +34,7 @@ pub struct IntifaceSessionController {
     latest_connect_request_id: Option<u64>,
     connect_in_progress: bool,
     connect_status_error: Option<String>,
+    next_reconnect_attempt_at: Option<Instant>,
 }
 
 impl IntifaceSessionController {
@@ -52,6 +65,7 @@ impl IntifaceSessionController {
 
         self.committed_url = Some(current_url);
         self.connect_status_error = None;
+        self.next_reconnect_attempt_at = None;
 
         if !is_valid_url(&config.intiface_websocket_url) {
             self.connect_status_error =
@@ -89,23 +103,39 @@ impl IntifaceSessionController {
     }
 
     pub fn connection_status_label(&self) -> String {
+        self.connection_status_label_at(Instant::now())
+    }
+
+    fn connection_status_label_at(&self, now: Instant) -> String {
         if self.connect_in_progress {
             return "Intiface: connecting...".into();
         }
 
-        if let Some(error) = self.connect_status_error.as_deref() {
-            return format!("Intiface: {error}");
-        }
-
         if intiface::is_connected() {
-            match intiface::last_event_elapsed() {
+            return match intiface::last_event_elapsed() {
                 Some(elapsed) => {
                     format!("Intiface: connected, last event {}s ago", elapsed.as_secs())
                 }
                 None => "Intiface: connected.".into(),
-            }
-        } else {
+            };
+        }
+
+        let retry_suffix = self
+            .next_reconnect_attempt_at
+            .map(|at| {
+                let remaining = at.saturating_duration_since(now).as_secs() + 1;
+                format!(" (retrying in {remaining}s)")
+            })
+            .unwrap_or_default();
+
+        if let Some(error) = self.connect_status_error.as_deref() {
+            return format!("Intiface: {error}{retry_suffix}");
+        }
+
+        if retry_suffix.is_empty() {
             "Intiface: not connected.".into()
+        } else {
+            format!("Intiface: not connected{retry_suffix}")
         }
     }
 
@@ -119,6 +149,7 @@ impl IntifaceSessionController {
         self.latest_connect_request_id = Some(request_id);
         self.connect_in_progress = true;
         self.connect_status_error = None;
+        self.next_reconnect_attempt_at = None;
         let tx = sender.clone();
         let url = config.intiface_websocket_url.trim().to_string();
         tokio::spawn(async move {
@@ -127,6 +158,49 @@ impl IntifaceSessionController {
                 warn!(target: "Intiface", "Could not deliver connect result: {err}");
             }
         });
+    }
+
+    pub fn pump(&mut self, sender: &Sender<SessionAsyncResult>, config: &Config) {
+        self.pump_at(Instant::now(), sender, config);
+    }
+
+    fn pump_at(
+        &mut self,
+        now: Instant,
+        sender: &Sender<SessionAsyncResult>,
+        config: &Config,
+    ) {
+        let url_valid = is_valid_url(&config.intiface_websocket_url);
+        let connected = intiface::is_connected();
+        match self.decide_reconnect_at(now, url_valid, connected) {
+            ReconnectAction::Idle => {}
+            ReconnectAction::Schedule(at) => {
+                self.next_reconnect_attempt_at = Some(at);
+            }
+            ReconnectAction::Fire => {
+                self.next_reconnect_attempt_at = None;
+                self.start_connect(sender, config);
+            }
+        }
+    }
+
+    fn decide_reconnect_at(
+        &self,
+        now: Instant,
+        url_valid: bool,
+        connected: bool,
+    ) -> ReconnectAction {
+        if let Some(at) = self.next_reconnect_attempt_at {
+            return if now >= at {
+                ReconnectAction::Fire
+            } else {
+                ReconnectAction::Idle
+            };
+        }
+        if !self.connect_in_progress && !connected && url_valid {
+            return ReconnectAction::Schedule(now + RECONNECT_DELAY);
+        }
+        ReconnectAction::Idle
     }
 }
 
@@ -151,9 +225,14 @@ pub fn is_valid_url(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
+
     use super::{
         is_valid_url, normalize_url_field, normalized_url, IntifaceSessionController,
-        SessionAsyncResult,
+        ReconnectAction, SessionAsyncResult, RECONNECT_DELAY,
     };
     use crate::config::Config;
 
@@ -246,5 +325,119 @@ mod tests {
 
         assert!(!controller.connect_in_progress);
         assert!(controller.connect_status_error.is_none());
+    }
+
+    fn fixed_now() -> Instant {
+        Instant::now()
+    }
+
+    #[test]
+    fn decide_reconnect_schedules_when_disconnected_with_valid_url() {
+        let controller = IntifaceSessionController::default();
+        let now = fixed_now();
+        assert_eq!(
+            controller.decide_reconnect_at(now, true, false),
+            ReconnectAction::Schedule(now + RECONNECT_DELAY)
+        );
+    }
+
+    #[test]
+    fn decide_reconnect_idle_with_invalid_url() {
+        let controller = IntifaceSessionController::default();
+        assert_eq!(
+            controller.decide_reconnect_at(fixed_now(), false, false),
+            ReconnectAction::Idle
+        );
+    }
+
+    #[test]
+    fn decide_reconnect_idle_while_connect_in_progress() {
+        let mut controller = IntifaceSessionController::default();
+        controller.connect_in_progress = true;
+        assert_eq!(
+            controller.decide_reconnect_at(fixed_now(), true, false),
+            ReconnectAction::Idle
+        );
+    }
+
+    #[test]
+    fn decide_reconnect_idle_when_already_connected() {
+        let controller = IntifaceSessionController::default();
+        assert_eq!(
+            controller.decide_reconnect_at(fixed_now(), true, true),
+            ReconnectAction::Idle
+        );
+    }
+
+    #[test]
+    fn decide_reconnect_idle_while_pending_delay_has_not_elapsed() {
+        let mut controller = IntifaceSessionController::default();
+        let now = fixed_now();
+        controller.next_reconnect_attempt_at = Some(now + Duration::from_secs(1));
+        assert_eq!(
+            controller.decide_reconnect_at(now, true, false),
+            ReconnectAction::Idle
+        );
+    }
+
+    #[test]
+    fn decide_reconnect_fires_when_pending_delay_has_elapsed() {
+        let mut controller = IntifaceSessionController::default();
+        let now = fixed_now();
+        controller.next_reconnect_attempt_at = Some(now);
+        assert_eq!(
+            controller.decide_reconnect_at(now, true, false),
+            ReconnectAction::Fire
+        );
+    }
+
+    #[test]
+    fn connection_status_label_appends_retry_countdown_when_disconnected() {
+        let mut controller = IntifaceSessionController::default();
+        let now = Instant::now();
+        controller.next_reconnect_attempt_at = Some(now + Duration::from_secs(2));
+        assert_eq!(
+            controller.connection_status_label_at(now),
+            "Intiface: not connected (retrying in 3s)"
+        );
+    }
+
+    #[test]
+    fn connection_status_label_combines_error_and_retry_countdown() {
+        let mut controller = IntifaceSessionController::default();
+        let now = Instant::now();
+        controller.connect_status_error = Some("boom".into());
+        controller.next_reconnect_attempt_at = Some(now + Duration::from_millis(500));
+        assert_eq!(
+            controller.connection_status_label_at(now),
+            "Intiface: boom (retrying in 1s)"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_after_url_commit_cancels_pending_retry_for_valid_url() {
+        let (tx, _rx) = mpsc::channel();
+        let mut controller = IntifaceSessionController::default();
+        controller.next_reconnect_attempt_at = Some(Instant::now() + Duration::from_secs(2));
+        let mut config = Config::default();
+        config.intiface_websocket_url = "ws://example/".into();
+
+        controller.refresh_after_url_commit(&tx, &mut config);
+
+        assert!(controller.next_reconnect_attempt_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn refresh_after_url_commit_cancels_pending_retry_for_invalid_url() {
+        let (tx, _rx) = mpsc::channel();
+        let mut controller = IntifaceSessionController::default();
+        controller.next_reconnect_attempt_at = Some(Instant::now() + Duration::from_secs(2));
+        let mut config = Config::default();
+        config.intiface_websocket_url = "not-a-url".into();
+
+        controller.refresh_after_url_commit(&tx, &mut config);
+
+        assert!(controller.next_reconnect_attempt_at.is_none());
+        assert!(controller.connect_status_error.is_some());
     }
 }
