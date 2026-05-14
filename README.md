@@ -15,10 +15,14 @@ Reward yourself for playing well! **CS2 Love** is a small app that connects Coun
 ## Quick Start Guide
 
 1. Download and launch `cs2love.exe`.
-2. Open Intiface Central, press **Start Server**, and pair your toy through the **Devices** tab.
+2. Open [Intiface Central](https://intiface.com/central), press **Start Server**, and pair your toy through the **Devices** tab.
 3. In CS2 Love, follow the **Setup Guide** to install the CS2 integration, enter the Intiface URL (default `ws://127.0.0.1:12345`), and pick the toys you want to use.
 4. Hit **Test vibrate** to confirm everything is wired up.
 5. Jump into a live CS2 match and rack up some kills.
+
+<p align="center">
+  <img src="assets/app-example.png" width="314" height="655" alt="cs2love App Interface"/>
+</p>
 
 ## Customizing Your Experience
 
